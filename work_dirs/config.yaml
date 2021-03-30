@@ -1,0 +1,50 @@
+data:
+    train:
+        paths:
+            - data/processed/splits/fold_0.json
+            - data/processed/splits/fold_1.json
+            - data/processed/splits/fold_2.json
+            - data/processed/splits/fold_3.json
+            - data/processed/splits/fold_4.json
+            - data/processed/splits/fold_5.json
+            - data/processed/splits/fold_8.json
+            - data/processed/splits/fold_9.json
+        p_augmentation: 0.3  # probability of performing random token replacement during training
+    val:
+        paths:
+            - data/processed/splits/fold_6.json
+    test:
+        paths:
+            - data/processed/splits/fold_7.json
+
+model:
+    model_name_or_path: cahya/xlm-roberta-large-indonesian-NER
+    config_name: null
+    tokenizer_name: null
+    cache_dir: null
+    cls_token: <s>  # need this to map token index. might be "<s>" or "[CLS]", depending on the tokenizer
+    sep_token: </s>  # need this to map token index. might be "</s>" or "[SEP]", depending on the tokenizer
+
+    model_class: BertForAddressExtractionWithTwoLinkedHeads
+    freeze_base_model: False
+    fusion: max_pooling
+    lambdas: [1, 1, 1, 1]
+
+training:
+    work_dir: work_dirs/  # set to `null` to not save anything
+    learning_rate: 5e-5
+    weight_decay: 0.01
+    lr_warmup: 0.1  # fraction of total number of iterations used to warm up training
+    max_grad_norm: 1.0
+
+    device: cuda
+    batch_size: 32
+    batch_size_multiplier: 1.2  # eval/train batch size ratio
+    num_epochs: 100
+    num_workers: 8
+    debugging: false  # set to 'true' to perform only 10 iterations per epoch
+    early_stopping: 2  # stop training when model is not improved over this number of epochs
+
+evaluation:
+    confidence_threshold: 0.51  # predictions with confidence thresholds less than this will be discarded
+    post_processing: true  # whether to perform post processing (recommended)
