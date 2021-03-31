@@ -49,6 +49,4 @@ python evaluate.py \
   -m work_dirs/yyyymmdd_hhmmss/checkpoint_best.pth \
   -d data/processed/test_processed.json \
   -s work_dirs/yyyymmdd_hhmmss/test_results.csv
-  --post-processing
-  --confidence-threshold 0.51
 ```
