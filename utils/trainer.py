@@ -4,6 +4,7 @@ import json
 import datetime
 from pathlib import Path
 from shutil import copy, SameFileError
+from threading import main_thread
 
 from tqdm import tqdm
 import torch
@@ -54,7 +55,11 @@ class Trainer:
         # Set additional attributes
         self._set_epoch(self.start_epoch - 1)  # training not yet started
         self.config["trainer"] = self
-        self._best_acc = -float("inf")
+
+        self.early_stopping_metrics = self.config["training"]["early_stopping_metrics"]
+        if isinstance(self.early_stopping_metrics, str):
+            self.early_stopping_metrics = [self.early_stopping_metrics]
+        self._best_metric = -float("inf")
         self._no_improve = 0
         self._stop = False
         self._is_best = False
@@ -100,7 +105,7 @@ class Trainer:
         # Get model class
         model_class = self.config["model"].get("model_class", None)
         if model_class is None:
-            model_class = "BertForAddressExtractionWithTwoSeparateHeads"  # default model class
+            model_class = "BertForDBpediaDocumentClassification"  # default model class
         model_init = model_classes[model_class]
         # Initialize backbone model
         logger.info("Initializing model...")
@@ -158,6 +163,11 @@ class Trainer:
         batch_size_multiplier = self.config["training"].get(
             "batch_size_multiplier", 1.0)
 
+        dataset_config = self.config["data"]
+        max_word_count = dataset_config["max_word_count"]
+        min_word_count = dataset_config["min_word_count"]
+        mapping_path = dataset_config["mapping_path"]
+
         if self.action == "training":
             for set_name, set_info in self.config["data"].items():
                 if set_name not in ["train", "val", "test"]:
@@ -173,8 +183,10 @@ class Trainer:
                     p_augmentation = 0.0
 
                 dataset = CustomDataset(
-                    self.config, tokenizer=self.tokenizer,
-                    paths=set_info["paths"], p_augmentation=p_augmentation)
+                    self.config, tokenizer=self.tokenizer, paths=set_info["paths"],
+                    mapping_path=mapping_path, max_word_count=max_word_count,
+                    min_word_count=min_word_count, p_augmentation=p_augmentation
+                )
                 self.dataloaders[set_name] = DataLoader(
                     dataset, batch_size=bs, shuffle=shuffle,
                     collate_fn=collate_fn, num_workers=num_workers)
@@ -188,7 +200,8 @@ class Trainer:
             else:
                 data_path = self.config["data_path"]
             dataset = CustomDataset(
-                self.config, tokenizer=self.tokenizer, paths=data_path, p_augmentation=0.0)
+                self.config, tokenizer=self.tokenizer, paths=data_path, max_word_count=max_word_count,
+                min_word_count=min_word_count, p_augmentation=0.0)
             self.dataloaders["eval"] = DataLoader(
                 dataset, batch_size=round(batch_size * batch_size_multiplier),
                 shuffle=False, collate_fn=collate_fn, num_workers=num_workers)
@@ -221,17 +234,14 @@ class Trainer:
         self.epoch = self.config["epoch"] = epoch
 
     def train_one_epoch(self, model, dataloader, optimizer, scheduler, num_epochs, max_grad_norm=None,
-                        debugging=False, post_processing=False):
+                        debugging=False):
         """Train the model for one epoch."""
         model.train()
         timer = Timer()
 
         print(
-            ("{:25}" + "|" + "{:^45}" + "|" + "{:^45}" + "|").format("", "POI", "street")
-        )
-        print(
-            ("{:25}" + "|" + "{:^15}" * 3 + "|" + "{:^15}" * 3 + "|").format(
-                "", "span_loss", "existence_loss", "acc", "span_loss", "existence_loss", "acc")
+            ("{:25}" + "|" + "{:^15}" * (3 + len(self.early_stopping_metrics)) + "|").format(
+                "", "l1_loss", "l2_loss", "l3_loss", *self.early_stopping_metrics)
         )
 
         total = 10 if debugging else len(dataloader)
@@ -252,27 +262,23 @@ class Trainer:
                 output = model(**data)
                 losses = output["losses"]
 
-                # Calculate batch accuracy
-                acc = compute_metrics_from_inputs_and_outputs(
-                    inputs=data, outputs=output, tokenizer=self.tokenizer, save_csv_path=None,
-                    confidence_threshold=self.config["evaluation"]["confidence_threshold"],
-                    post_processing=post_processing)
-                losses.update(acc)
+                # Calculate batch metrics
+                metric = compute_metrics_from_inputs_and_outputs(
+                    inputs=data, outputs=output, tokenizer=self.tokenizer, save_csv_path=None)
+                losses.update(metric)
 
                 # Update tqdm with training information
                 to_tqdm = []  # update tqdm
-                for name in ["poi", "street"]:
-                    for loss_type in ["span_loss", "existence_loss", "acc"]:
-                        n = f"{name}_{loss_type}"
-                        loss_n = losses[n]
+                for loss_type in ["l1_cls_loss", "l2_cls_loss", "l3_cls_loss", *self.early_stopping_metrics]:
+                    loss_n = losses[loss_type]
 
-                        if torch.isnan(loss_n):
-                            to_tqdm.append("nan")
-                        else:
-                            to_tqdm.append(f"{loss_n.item():.3f}")
+                    if isinstance(loss_n, torch.Tensor) and torch.isnan(loss_n):
+                        to_tqdm.append("nan")
+                    else:
+                        to_tqdm.append(f"{loss_n.item():.3f}")
 
                 des = (
-                    "{:25}" + "|" + "{:^15}" * 3 + "|" + "{:^15}" * 3 + "|"
+                    "{:25}" + "|" + "{:^15}" * (3 + len(self.early_stopping_metrics)) + "|"
                 ).format(description, *to_tqdm)
                 t.set_description(des)
 
@@ -293,8 +299,7 @@ class Trainer:
         logger.info(f"{description} took {timer.get_total_time():.2f}s.")
         return
 
-    def evaluate_one_epoch(self, model, dataloader, prefix, debugging=False, save_csv_path=None,
-                           post_processing=False, show_progress=False):
+    def evaluate_one_epoch(self, model, dataloader, prefix, debugging=False, save_csv_path=None, show_progress=False):
         """Evaluate the model for one epoch."""
         model.eval()
         tot_inp, tot_outp = [], []
@@ -317,25 +322,25 @@ class Trainer:
                     if debugging and i == 9:
                         break
 
-        acc = compute_metrics_from_inputs_and_outputs(
+        metrics = compute_metrics_from_inputs_and_outputs(
             inputs=tot_inp, outputs=tot_outp, tokenizer=self.tokenizer, save_csv_path=save_csv_path,
-            confidence_threshold=self.config["evaluation"]["confidence_threshold"], post_processing=post_processing,
             show_progress=show_progress)
 
-        if acc is not None:
-            self._record_metrics(acc)
+        if metrics is not None:
+            self._record_metrics(metrics)
 
-            to_log = [f"{k}: {v.item():.3f}" for k, v in acc.items()]
-            logger.info(f"{prefix}: {', '.join(to_log)}")
+            to_log = json.dumps(metrics, indent=2)
+            logger.info(f"{prefix}:\n{to_log}")
 
         model.train()
         return
 
-    def _record_metrics(self, acc):
-        total_acc = acc["total_acc"]
+    def _record_metrics(self, metrics):
+        metrics = [metrics[metric_name] for metric_name in self.early_stopping_metrics]
+        metric = sum(metrics) / len(metrics)
 
-        if self._best_acc < total_acc:
-            self._best_acc = total_acc
+        if self._best_metric < metric:
+            self._best_metric = metric
             self._is_best = True
             self._no_improve = 0
         else:
@@ -346,7 +351,7 @@ class Trainer:
         self._stop = (self._no_improve > early_stopping) if early_stopping is not None else False
 
     @from_config(main_args="training", requires_all=True)
-    def _train(self, num_epochs, debugging=False, max_grad_norm=None, post_processing=False):
+    def _train(self, num_epochs, debugging=False, max_grad_norm=None):
 
         if self.load_from is not None or self.resume_from is not None:
             self.evaluate_one_epoch(
@@ -360,11 +365,11 @@ class Trainer:
             # Train
             self.train_one_epoch(
                 self.model, self.dataloaders["train"], self.optimizer, self.scheduler, num_epochs=num_epochs,
-                max_grad_norm=max_grad_norm, debugging=debugging, post_processing=post_processing)
+                max_grad_norm=max_grad_norm, debugging=debugging)
 
             # Evaluate
             self.evaluate_one_epoch(
-                self.model, self.dataloaders["val"], debugging=debugging, post_processing=post_processing,
+                self.model, self.dataloaders["val"], debugging=debugging,
                 prefix=f"Validation (epoch: {epoch}/{num_epochs})")
 
             # Checkpoint
@@ -383,7 +388,7 @@ class Trainer:
 
         # Test
         self.evaluate_one_epoch(
-            self.model, self.dataloaders["test"], debugging=False, prefix="Test", post_processing=post_processing)
+            self.model, self.dataloaders["test"], debugging=False, prefix="Test")
         logger.info("Training finished.")
 
     def train(self):
@@ -392,6 +397,5 @@ class Trainer:
     def eval(self):
         assert self.action == "evaluation"
         return self.evaluate_one_epoch(
-            self.model, self.dataloaders["eval"], prefix="Evaluation",
-            post_processing=self.config["evaluation"]["post_processing"], show_progress=True,
+            self.model, self.dataloaders["eval"], prefix="Evaluation", show_progress=True,
             debugging=False, save_csv_path=self.config["save_csv_path"])

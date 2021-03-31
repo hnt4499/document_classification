@@ -1,34 +1,35 @@
 data:
     train:
         paths:
-            - data/processed/splits/fold_0.json
-            - data/processed/splits/fold_1.json
-            - data/processed/splits/fold_2.json
-            - data/processed/splits/fold_3.json
-            - data/processed/splits/fold_4.json
-            - data/processed/splits/fold_5.json
-            - data/processed/splits/fold_8.json
-            - data/processed/splits/fold_9.json
-        p_augmentation: 0.3  # probability of performing random token replacement during training
+            - data/processed/split_0.csv
+            - data/processed/split_1.csv
+            - data/processed/split_2.csv
+            - data/processed/split_3.csv
+            - data/processed/split_4.csv
+            - data/processed/split_5.csv
+            - data/processed/split_8.csv
+            - data/processed/split_9.csv
+        p_augmentation: 1.0
     val:
         paths:
-            - data/processed/splits/fold_6.json
+            - data/processed/split_6.csv
     test:
         paths:
-            - data/processed/splits/fold_7.json
+            - data/processed/split_7.csv
+    mapping_path: data/processed/mapping.json
+    max_word_count: 150
+    min_word_count: 50
 
 model:
-    model_name_or_path: cahya/xlm-roberta-large-indonesian-NER
+    model_name_or_path: bert-base-uncased
     config_name: null
     tokenizer_name: null
     cache_dir: null
-    cls_token: <s>  # need this to map token index. might be "<s>" or "[CLS]", depending on the tokenizer
-    sep_token: </s>  # need this to map token index. might be "</s>" or "[SEP]", depending on the tokenizer
 
-    model_class: BertForAddressExtractionWithTwoLinkedHeads
+    model_class: BertForDBpediaDocumentClassification
     freeze_base_model: False
     fusion: max_pooling
-    lambdas: [1, 1, 1, 1]
+    lambdas: [1, 1, 1]
 
 training:
     work_dir: work_dirs/  # set to `null` to not save anything
@@ -37,14 +38,11 @@ training:
     lr_warmup: 0.1  # fraction of total number of iterations used to warm up training
     max_grad_norm: 1.0
 
-    device: cuda
+    device: cuda:1
     batch_size: 32
     batch_size_multiplier: 1.2  # eval/train batch size ratio
     num_epochs: 100
     num_workers: 8
     debugging: false  # set to 'true' to perform only 10 iterations per epoch
     early_stopping: 2  # stop training when model is not improved over this number of epochs
-
-evaluation:
-    confidence_threshold: 0.51  # predictions with confidence thresholds less than this will be discarded
-    post_processing: true  # whether to perform post processing (recommended)
+    early_stopping_metrics: [l1_f1_macro, l2_f1_macro, l3_f1_macro]
