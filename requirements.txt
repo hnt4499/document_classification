@@ -1,0 +1,7 @@
+transformers==4.4.2
+sentencepiece
+tqdm
+loguru
+PyYAML
+pandas
+scikit-learn
